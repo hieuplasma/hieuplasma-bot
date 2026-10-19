@@ -32,14 +32,21 @@ bot.onText(/\/nhietdo/, async (msg) => {
     bot.sendMessage(chatId, weather);
   });
 
+// Nút inline (callback) hoạt động cả trong group, kể cả khi bot bật privacy mode.
 bot.onText(/\/venha/, (msg) => {
-  const keyboard = [
-    ...PRESET_LOCATIONS.map((l) => [{ text: LOCATION_BUTTON_PREFIX + l.name }]),
-    [{ text: "📡 Gửi vị trí hiện tại", request_location: true }],
-  ];
-  bot.sendMessage(msg.chat.id, "Bạn đang ở đâu? Chọn địa điểm hoặc gửi vị trí hiện tại:", {
-    reply_markup: { keyboard, resize_keyboard: true, one_time_keyboard: true },
-  });
+  const inline_keyboard = PRESET_LOCATIONS.map((l, i) => [{ text: LOCATION_BUTTON_PREFIX + l.name, callback_data: `venha:${i}` }]);
+  bot.sendMessage(msg.chat.id, "Bạn đang ở đâu?", { reply_markup: { inline_keyboard } });
+
+  // Nút gửi vị trí hiện tại chỉ dùng được khi chat riêng với bot.
+  if (msg.chat.type === "private") {
+    bot.sendMessage(msg.chat.id, "Hoặc gửi vị trí hiện tại:", {
+      reply_markup: {
+        keyboard: [[{ text: "📡 Gửi vị trí hiện tại", request_location: true }]],
+        resize_keyboard: true,
+        one_time_keyboard: true,
+      },
+    });
+  }
 });
 
 async function replyRouteHome(chatId, origin) {
@@ -47,19 +54,20 @@ async function replyRouteHome(chatId, origin) {
   bot.sendMessage(chatId, text, { reply_markup: { remove_keyboard: true }, disable_web_page_preview: true });
 }
 
-bot.on("message", (msg) => {
-  if (msg.location) {
-    return replyRouteHome(msg.chat.id, {
-      name: "vị trí hiện tại",
-      latitude: msg.location.latitude,
-      longitude: msg.location.longitude,
-    });
-  }
-  if (msg.text?.startsWith(LOCATION_BUTTON_PREFIX)) {
-    const name = msg.text.slice(LOCATION_BUTTON_PREFIX.length);
-    const origin = PRESET_LOCATIONS.find((l) => l.name === name);
-    if (origin) return replyRouteHome(msg.chat.id, origin);
-  }
+bot.on("callback_query", async (query) => {
+  const match = query.data?.match(/^venha:(\d+)$/);
+  if (!match || !query.message) return;
+  const origin = PRESET_LOCATIONS[Number(match[1])];
+  await bot.answerCallbackQuery(query.id);
+  if (origin) replyRouteHome(query.message.chat.id, origin);
+});
+
+bot.on("location", (msg) => {
+  replyRouteHome(msg.chat.id, {
+    name: "vị trí hiện tại",
+    latitude: msg.location.latitude,
+    longitude: msg.location.longitude,
+  });
 });
 
 // Help command
