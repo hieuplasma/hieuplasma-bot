@@ -3,8 +3,8 @@ import axios from 'axios';
 // Nhà: đặt HOME_LAT / HOME_LNG / HOME_NAME trong .env để ghi đè.
 export const HOME = {
     name: process.env.HOME_NAME || 'Nhà (Tòa nhà C13 - Bộ Quốc phòng)',
-    latitude: Number(process.env.HOME_LAT) || 20.9771195,
-    longitude: Number(process.env.HOME_LNG) || 105.828928,
+    latitude: Number(process.env.HOME_LAT) || 20.98045,
+    longitude: Number(process.env.HOME_LNG) || 105.8266,
 };
 
 // Hai chỗ làm để chọn.
