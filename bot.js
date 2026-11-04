@@ -7,6 +7,7 @@ import { getFuelPrices } from "./gia_xang.js";
 import { getTemperatures } from "./nhiet_do.js";
 import { getRouteHome, PRESET_LOCATIONS, LOCATION_BUTTON_PREFIX } from "./ve_nha.js";
 import { listJobs } from "./scheduler.js";
+import { getServerStatus, listPm2Apps, restartPm2App } from "./server_status.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 // User id của chủ bot: gõ /myid khi chat riêng với bot để lấy, rồi điền vào .env.
@@ -122,6 +123,87 @@ bot.onText(/\/status/, ownerOnly((msg) => {
   );
 }));
 
+// /server: tình trạng server + nút restart từng app pm2 (phải bấm xác nhận lần nữa).
+const BOT_PM2_NAME = "hieuplasma_bot";
+
+function serverKeyboard(apps) {
+  const rows = [];
+  for (let i = 0; i < apps.length; i += 2) {
+    rows.push(apps.slice(i, i + 2).map((a) => ({ text: `🔄 ${a.name}`, callback_data: `srv:ask:${a.name}` })));
+  }
+  rows.push([{ text: "📊 Làm mới", callback_data: "srv:refresh" }]);
+  return { inline_keyboard: rows };
+}
+
+// Không có messageId thì gửi tin mới, có thì cập nhật tin cũ.
+async function sendServerStatus(chatId, messageId) {
+  const { text, apps } = await getServerStatus();
+  const reply_markup = serverKeyboard(apps);
+  if (!messageId) return bot.sendMessage(chatId, text, { reply_markup });
+  return bot.editMessageText(text, { chat_id: chatId, message_id: messageId, reply_markup }).catch((error) => {
+    if (!/message is not modified/.test(error.message)) throw error;
+  });
+}
+
+bot.onText(/\/server/, ownerOnly((msg) =>
+  sendServerStatus(msg.chat.id).catch((error) => console.error("/server error:", error.message)),
+));
+
+async function handleServerCallback(query, action, name) {
+  const chatId = query.message.chat.id;
+  const messageId = query.message.message_id;
+
+  if (action === "ask") {
+    await bot.answerCallbackQuery(query.id);
+    return bot.editMessageReplyMarkup(
+      {
+        inline_keyboard: [[
+          { text: `✅ Restart ${name}`, callback_data: `srv:yes:${name}` },
+          { text: "❌ Hủy", callback_data: "srv:no" },
+        ]],
+      },
+      { chat_id: chatId, message_id: messageId },
+    );
+  }
+
+  if (action === "yes") {
+    const apps = await listPm2Apps();
+    if (!apps.some((a) => a.name === name)) {
+      return bot.answerCallbackQuery(query.id, { text: `Không có app ${name}`, show_alert: true });
+    }
+    await bot.answerCallbackQuery(query.id, { text: `Đang restart ${name}...` });
+    // Restart chính bot thì tiến trình này bị tắt ngay, nên báo trước.
+    if (name === BOT_PM2_NAME) {
+      await bot.sendMessage(chatId, "🔄 Đang restart bot, chờ vài giây rồi gõ /server để kiểm tra.");
+    }
+    try {
+      await restartPm2App(name);
+    } catch (error) {
+      return bot.sendMessage(chatId, `❌ Restart ${name} lỗi: ${error.message}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await bot.sendMessage(chatId, `✅ Đã restart ${name}`);
+    return sendServerStatus(chatId, messageId);
+  }
+
+  // refresh hoặc hủy: hiện lại trạng thái + bàn phím đầy đủ.
+  await bot.answerCallbackQuery(query.id);
+  return sendServerStatus(chatId, messageId);
+}
+
+bot.on("callback_query", async (query) => {
+  const match = query.data?.match(/^srv:(refresh|ask|yes|no)(?::(.+))?$/);
+  if (!match || !query.message) return;
+  try {
+    if (!isOwner(query)) {
+      return await bot.answerCallbackQuery(query.id, { text: "⛔ Chỉ chủ bot mới dùng được.", show_alert: true });
+    }
+    await handleServerCallback(query, match[1], match[2]);
+  } catch (error) {
+    console.error("server callback error:", error.message);
+  }
+});
+
 // Danh sách lệnh dùng chung cho menu "/" của Telegram và /help.
 const COMMANDS = [
   { command: "giavang", description: "Xem giá vàng" },
@@ -130,6 +212,7 @@ const COMMANDS = [
   { command: "venha", description: "Tìm đường nhanh nhất về nhà bằng xe máy" },
   { command: "myid", description: "Xem user id / chat id" },
   { command: "status", description: "Tình trạng bot (chỉ chủ bot)" },
+  { command: "server", description: "Tình trạng server + restart app pm2 (chỉ chủ bot)" },
   { command: "help", description: "Xem các lệnh hỗ trợ" },
 ];
 bot.setMyCommands(COMMANDS).catch((error) => console.error("setMyCommands error:", error.message));
