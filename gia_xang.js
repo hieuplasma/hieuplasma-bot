@@ -3,16 +3,15 @@ import * as cheerio from 'cheerio';
 
 import { sendTelegramMessage } from './send_tele.js';
 
-const messageTime = new Date().toLocaleString('vi-VN', {
-    timeZone: 'Asia/Ho_Chi_Minh'
-  });
-
 // pvoil.com.vn is now behind Cloudflare's bot challenge and can't be scraped
 // directly, so we read Petrolimex's official retail prices via webgia.com,
 // which republishes them in a plain HTML table.
 function parseFuelPrices(html) {
     const $ = cheerio.load(html);
     const updatedAt = $('h1.h-head small').text().replace(/^-\s*/, '').trim();
+    const messageTime = new Date().toLocaleString('vi-VN', {
+        timeZone: 'Asia/Ho_Chi_Minh',
+    });
 
     let message = `Giá xăng dầu Petrolimex - ${updatedAt || messageTime}:\n\n`;
 

@@ -6,11 +6,35 @@ import { getGoldPrices } from "./gia_vang.js";
 import { getFuelPrices } from "./gia_xang.js";
 import { getTemperatures } from "./nhiet_do.js";
 import { getRouteHome, PRESET_LOCATIONS, LOCATION_BUTTON_PREFIX } from "./ve_nha.js";
+import { listJobs } from "./scheduler.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
+// User id của chủ bot: gõ /myid khi chat riêng với bot để lấy, rồi điền vào .env.
+const OWNER_CHAT_ID = process.env.OWNER_CHAT_ID;
 
 // Create a bot using polling
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
+
+function isOwner(msg) {
+  return Boolean(OWNER_CHAT_ID) && String(msg.from?.id) === OWNER_CHAT_ID;
+}
+
+// Bọc handler của lệnh chỉ chủ bot được dùng. Chưa cấu hình OWNER_CHAT_ID thì chặn hết.
+function ownerOnly(handler) {
+  return (msg, match) => {
+    if (!isOwner(msg)) {
+      return bot.sendMessage(msg.chat.id, "⛔ Lệnh này chỉ dành cho chủ bot.");
+    }
+    return handler(msg, match);
+  };
+}
+
+// Báo riêng cho chủ bot, ví dụ làm onError khi thêm lịch:
+// scheduleJob("ban-tin-sang", "0 7 * * 1-5", fn, (name, e) => notifyOwner(`⚠️ ${name}: ${e.message}`))
+function notifyOwner(text) {
+  if (!OWNER_CHAT_ID) return;
+  bot.sendMessage(OWNER_CHAT_ID, text).catch((error) => console.error("notifyOwner error:", error.message));
+}
 
 
 // Command listener
@@ -70,16 +94,37 @@ bot.on("location", (msg) => {
   });
 });
 
-// Help command
-const help = `
-/start - Start the bot
-/help - Xem các lệnh hỗ trợ
+bot.onText(/\/myid/, (msg) => {
+  bot.sendMessage(msg.chat.id, `User id của bạn: ${msg.from.id}\nChat id: ${msg.chat.id}`);
+});
 
-/giavang - Xem giá vàng
-/giaxang - Xem giá xăng dầu
-/nhietdo - Xem nhiệt độ Hà Nội, Hải Thịnh, Phù Khê
-/venha - Tìm đường nhanh nhất về nhà bằng xe máy
-`;
+bot.onText(/\/status/, ownerOnly((msg) => {
+  const uptimeMinutes = Math.round(process.uptime() / 60);
+  const memoryMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
+  const jobs = listJobs();
+  const jobLines = jobs.length ? jobs.map((j) => `• ${j.name} (${j.expression})`).join("\n") : "• (chưa có)";
+  bot.sendMessage(
+    msg.chat.id,
+    `🤖 Bot đang chạy ${Math.floor(uptimeMinutes / 60)} giờ ${uptimeMinutes % 60} phút\n` +
+      `💾 RAM: ${memoryMb} MB\n` +
+      `⏰ Lịch tự động:\n${jobLines}`,
+  );
+}));
+
+// Danh sách lệnh dùng chung cho menu "/" của Telegram và /help.
+const COMMANDS = [
+  { command: "giavang", description: "Xem giá vàng" },
+  { command: "giaxang", description: "Xem giá xăng dầu" },
+  { command: "nhietdo", description: "Xem nhiệt độ Hà Nội, Hải Thịnh, Phù Khê" },
+  { command: "venha", description: "Tìm đường nhanh nhất về nhà bằng xe máy" },
+  { command: "myid", description: "Xem user id / chat id" },
+  { command: "status", description: "Tình trạng bot (chỉ chủ bot)" },
+  { command: "help", description: "Xem các lệnh hỗ trợ" },
+];
+bot.setMyCommands(COMMANDS).catch((error) => console.error("setMyCommands error:", error.message));
+
+// Help command
+const help = COMMANDS.map((c) => `/${c.command} - ${c.description}`).join("\n");
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
   bot.sendMessage(chatId, "Chào mừng bạn đến với bot Hieuplasma!\n" + "Vui lòng nhập /help để xem các lệnh hỗ trợ.");

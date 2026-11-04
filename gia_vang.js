@@ -3,10 +3,6 @@ import crypto from 'crypto';
 
 import { sendTelegramMessage } from './send_tele.js';
 
-const messageTime = new Date().toLocaleString('vi-VN', {
-    timeZone: 'Asia/Ho_Chi_Minh'
-  });
-
 // DOJI retired giavang.doji.vn (old XML API) in favor of banggia.doji.vn, whose
 // API encrypts the payload client-side; key/IV layout reverse-engineered from
 // the site's JS bundle (chunk-MGKSBPRZ.js, class Z0._k / decrypt()).
@@ -37,6 +33,9 @@ export async function getGoldPrices() {
         }
 
         // Send message to Telegram
+        const messageTime = new Date().toLocaleString('vi-VN', {
+            timeZone: 'Asia/Ho_Chi_Minh',
+        });
         const message = `Giá vàng ${messageTime}:\n\n${messageContent}`;
         return message
     } catch (error) {

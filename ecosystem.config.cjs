@@ -3,7 +3,8 @@ module.exports = {
         {
             name: "hieuplasma_bot",
             script: "bot.js",
-            watch: true,
+            // Không watch: deploy.sh tự restart sau khi git pull + yarn install xong.
+            watch: false,
             cron_restart: '00 01 * * *',
             env: {
                 NODE_ENV: "development",
