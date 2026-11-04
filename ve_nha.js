@@ -91,18 +91,26 @@ async function routeWithOsrm(origin, dest) {
         seconds: route.duration,
         meters: route.distance,
         via: summarizeRoads(route.legs.flatMap((leg) => leg.steps)),
-        source: 'OSRM (ước lượng)',
+        source: 'OSRM - ước lượng đường thông thoáng, chưa tính tắc đường, thực tế thường lâu hơn nhiều',
     };
 }
 
 export async function getRouteHome(origin) {
     const key = process.env.GOOGLE_MAPS_API_KEY;
-    let route;
-    try {
-        route = key ? await routeWithGoogle(origin, HOME, key) : await routeWithOsrm(origin, HOME);
-    } catch (error) {
-        console.error('Route error:', error.response?.data || error.message);
-        route = null;
+    let route = null;
+    if (key) {
+        try {
+            route = await routeWithGoogle(origin, HOME, key);
+        } catch (error) {
+            console.error('Google route error:', error.response?.data || error.message);
+        }
+    }
+    if (!route) {
+        try {
+            route = await routeWithOsrm(origin, HOME);
+        } catch (error) {
+            console.error('OSRM route error:', error.response?.data || error.message);
+        }
     }
 
     const link = mapsLink(origin, HOME);
