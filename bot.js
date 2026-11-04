@@ -15,6 +15,17 @@ const OWNER_CHAT_ID = process.env.OWNER_CHAT_ID;
 // Create a bot using polling
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
+// Mạng chập chờn làm polling lỗi liên tục (ESOCKETTIMEDOUT, 502...), thư viện tự thử lại.
+// Mỗi loại lỗi chỉ log tối đa 1 lần/phút, không thì log phình lên hàng trăm MB.
+const lastPollingErrorAt = {};
+bot.on("polling_error", (error) => {
+  const key = `${error.code}:${error.message}`;
+  const now = Date.now();
+  if (now - (lastPollingErrorAt[key] || 0) < 60_000) return;
+  lastPollingErrorAt[key] = now;
+  console.error(`[polling_error] ${new Date().toISOString()} ${key}`);
+});
+
 function isOwner(msg) {
   return Boolean(OWNER_CHAT_ID) && String(msg.from?.id) === OWNER_CHAT_ID;
 }
