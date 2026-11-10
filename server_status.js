@@ -1,4 +1,5 @@
 import { execFile } from 'child_process';
+import fs from 'fs';
 import os from 'os';
 import { promisify } from 'util';
 
@@ -7,7 +8,7 @@ const run = promisify(execFile);
 // Ngưỡng đánh dấu ⚠️ cho RAM / đĩa (%).
 const WARN_PERCENT = 85;
 
-function formatDuration(ms) {
+export function formatDuration(ms) {
     const minutes = Math.floor(ms / 60000);
     const days = Math.floor(minutes / 1440);
     const hours = Math.floor((minutes % 1440) / 60);
@@ -33,11 +34,14 @@ export async function listPm2Apps() {
         .filter((p) => !p.pm2_env.pmx_module)
         .map((p) => ({
             name: p.name,
+            pmId: p.pm_id,
             status: p.pm2_env.status,
             uptimeMs: p.pm2_env.status === 'online' ? Date.now() - p.pm2_env.pm_uptime : 0,
             restarts: p.pm2_env.restart_time,
             memory: p.monit?.memory || 0,
             cpu: p.monit?.cpu || 0,
+            errLogPath: p.pm2_env.pm_err_log_path,
+            outLogPath: p.pm2_env.pm_out_log_path,
         }));
 }
 
@@ -80,4 +84,20 @@ export async function getServerStatus() {
 
 export async function restartPm2App(name) {
     await run('pm2', ['restart', name], { timeout: 30000 });
+}
+
+// n dòng cuối (không rỗng) của file log, bỏ mã màu ANSI. Chỉ đọc 64KB cuối nên file lớn cũng nhanh.
+export async function tailLines(file, n) {
+    const fh = await fs.promises.open(file, 'r');
+    try {
+        const { size } = await fh.stat();
+        const length = Math.min(size, 64 * 1024);
+        const buf = Buffer.alloc(length);
+        await fh.read(buf, 0, length, size - length);
+        const lines = buf.toString('utf8').replace(/\x1b\[[0-9;]*m/g, '').split('\n');
+        if (length < size) lines.shift(); // dòng đầu có thể bị cắt dở
+        return lines.filter((l) => l.trim()).slice(-n);
+    } finally {
+        await fh.close();
+    }
 }

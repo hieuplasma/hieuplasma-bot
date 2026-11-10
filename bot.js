@@ -6,8 +6,9 @@ import { getGoldPrices } from "./gia_vang.js";
 import { getFuelPrices } from "./gia_xang.js";
 import { getTemperatures } from "./nhiet_do.js";
 import { getRouteHome, PRESET_LOCATIONS, LOCATION_BUTTON_PREFIX } from "./ve_nha.js";
-import { listJobs } from "./scheduler.js";
-import { getServerStatus, listPm2Apps, restartPm2App } from "./server_status.js";
+import { listJobs, scheduleJob } from "./scheduler.js";
+import { getServerStatus, listPm2Apps, restartPm2App, tailLines } from "./server_status.js";
+import { checkPm2, checkSites } from "./monitor.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 // User id của chủ bot: gõ /myid khi chat riêng với bot để lấy, rồi điền vào .env.
@@ -41,12 +42,24 @@ function ownerOnly(handler) {
   };
 }
 
-// Báo riêng cho chủ bot, ví dụ làm onError khi thêm lịch:
-// scheduleJob("ban-tin-sang", "0 7 * * 1-5", fn, (name, e) => notifyOwner(`⚠️ ${name}: ${e.message}`))
+// Báo riêng cho chủ bot.
 function notifyOwner(text) {
   if (!OWNER_CHAT_ID) return;
   bot.sendMessage(OWNER_CHAT_ID, text).catch((error) => console.error("notifyOwner error:", error.message));
 }
+
+// Dùng làm onError của scheduleJob. Job chạy mỗi phút mà lỗi hoài thì mỗi giờ chỉ báo 1 lần.
+const lastJobErrorAt = {};
+function reportJobError(name, error) {
+  const now = Date.now();
+  if (now - (lastJobErrorAt[name] || 0) < 60 * 60_000) return;
+  lastJobErrorAt[name] = now;
+  notifyOwner(`⚠️ Job ${name} lỗi: ${error.message}`);
+}
+
+// Canh chừng: web sập (gọi thử từng app) và app pm2 crash, mỗi phút một lần.
+scheduleJob("canh-web", "* * * * *", () => checkSites(notifyOwner), reportJobError);
+scheduleJob("canh-pm2", "* * * * *", () => checkPm2(notifyOwner), reportJobError);
 
 
 // Command listener
@@ -204,6 +217,62 @@ bot.on("callback_query", async (query) => {
   }
 });
 
+// /logs: xem log của app pm2. "/logs" hiện nút chọn app, "/logs uongbia [out] [số dòng]".
+const LOG_DEFAULT_LINES = 30;
+const LOG_MAX_LINES = 200;
+const TELEGRAM_MAX_TEXT = 4000;
+
+async function sendAppLog(chatId, name, kind = "err", lines = LOG_DEFAULT_LINES) {
+  const app = (await listPm2Apps()).find((a) => a.name === name);
+  if (!app) return bot.sendMessage(chatId, `Không có app ${name}. Gõ /logs để chọn.`);
+  const file = kind === "out" ? app.outLogPath : app.errLogPath;
+  let body;
+  try {
+    body = (await tailLines(file, lines)).join("\n") || "(trống)";
+  } catch (error) {
+    body = `Không đọc được ${file}: ${error.message}`;
+  }
+  const header = `📜 ${name} - log ${kind === "out" ? "thường" : "lỗi"}, ${lines} dòng cuối:\n\n`;
+  // Quá dài thì cắt bớt phần cũ, giữ phần mới nhất.
+  const room = TELEGRAM_MAX_TEXT - header.length;
+  if (body.length > room) body = "…" + body.slice(-(room - 1));
+  return bot.sendMessage(chatId, header + body, { disable_web_page_preview: true });
+}
+
+bot.onText(/^\/logs(?:@\w+)?(?:\s+(.*))?$/, ownerOnly(async (msg, match) => {
+  try {
+    const args = (match[1] || "").trim().split(/\s+/).filter(Boolean);
+    const name = args.find((a) => a !== "out" && !/^\d+$/.test(a));
+    if (!name) {
+      const apps = await listPm2Apps();
+      const inline_keyboard = apps.map((a) => [
+        { text: `❗ ${a.name}`, callback_data: `logs:err:${a.name}` },
+        { text: `📄 ${a.name}`, callback_data: `logs:out:${a.name}` },
+      ]);
+      return await bot.sendMessage(msg.chat.id, "Xem log app nào? (❗ log lỗi, 📄 log thường)", { reply_markup: { inline_keyboard } });
+    }
+    const kind = args.includes("out") ? "out" : "err";
+    const count = Math.min(Number(args.find((a) => /^\d+$/.test(a))) || LOG_DEFAULT_LINES, LOG_MAX_LINES);
+    await sendAppLog(msg.chat.id, name, kind, count);
+  } catch (error) {
+    console.error("/logs error:", error.message);
+  }
+}));
+
+bot.on("callback_query", async (query) => {
+  const match = query.data?.match(/^logs:(err|out):(.+)$/);
+  if (!match || !query.message) return;
+  try {
+    if (!isOwner(query)) {
+      return await bot.answerCallbackQuery(query.id, { text: "⛔ Chỉ chủ bot mới dùng được.", show_alert: true });
+    }
+    await bot.answerCallbackQuery(query.id);
+    await sendAppLog(query.message.chat.id, match[2], match[1]);
+  } catch (error) {
+    console.error("logs callback error:", error.message);
+  }
+});
+
 // Danh sách lệnh dùng chung cho menu "/" của Telegram và /help.
 const COMMANDS = [
   { command: "giavang", description: "Xem giá vàng" },
@@ -213,6 +282,7 @@ const COMMANDS = [
   { command: "myid", description: "Xem user id / chat id" },
   { command: "status", description: "Tình trạng bot (chỉ chủ bot)" },
   { command: "server", description: "Tình trạng server + restart app pm2 (chỉ chủ bot)" },
+  { command: "logs", description: "Xem log app pm2, vd /logs uongbia (chỉ chủ bot)" },
   { command: "help", description: "Xem các lệnh hỗ trợ" },
 ];
 bot.setMyCommands(COMMANDS).catch((error) => console.error("setMyCommands error:", error.message));
