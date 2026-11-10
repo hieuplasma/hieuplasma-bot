@@ -9,6 +9,7 @@ import { getRouteHome, PRESET_LOCATIONS, LOCATION_BUTTON_PREFIX } from "./ve_nha
 import { listJobs, scheduleJob } from "./scheduler.js";
 import { getServerStatus, listPm2Apps, restartPm2App, tailLines } from "./server_status.js";
 import { checkPm2, checkSites } from "./monitor.js";
+import { addNote, deleteNote, getNote, renderNotesPage, renderSearch } from "./notes.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 // User id của chủ bot: gõ /myid khi chat riêng với bot để lấy, rồi điền vào .env.
@@ -27,6 +28,12 @@ bot.on("polling_error", (error) => {
   lastPollingErrorAt[key] = now;
   console.error(`[polling_error] ${new Date().toISOString()} ${key}`);
 });
+
+// Regex cho lệnh: chỉ khớp khi tin nhắn bắt đầu bằng lệnh (kể cả dạng /lenh@TenBot trong group).
+// match[1] là phần chữ phía sau lệnh. "/note" không khớp "/notes".
+function cmd(name) {
+  return new RegExp(`^\\/${name}(?:@\\w+)?(?:\\s+([\\s\\S]*))?$`);
+}
 
 function isOwner(msg) {
   return Boolean(OWNER_CHAT_ID) && String(msg.from?.id) === OWNER_CHAT_ID;
@@ -63,26 +70,26 @@ scheduleJob("canh-pm2", "* * * * *", () => checkPm2(notifyOwner), reportJobError
 
 
 // Command listener
-bot.onText(/\/giavang/, async (msg) => {
+bot.onText(cmd("giavang"), async (msg) => {
   const chatId = msg.chat.id;
   const price = await getGoldPrices();
   bot.sendMessage(chatId, price);
 });
 
-bot.onText(/\/giaxang/, async (msg) => {
+bot.onText(cmd("giaxang"), async (msg) => {
     const chatId = msg.chat.id;
     const price = await getFuelPrices();
     bot.sendMessage(chatId, price);
   });
 
-bot.onText(/\/nhietdo/, async (msg) => {
+bot.onText(cmd("nhietdo"), async (msg) => {
     const chatId = msg.chat.id;
     const weather = await getTemperatures();
     bot.sendMessage(chatId, weather);
   });
 
 // Nút inline (callback) hoạt động cả trong group, kể cả khi bot bật privacy mode.
-bot.onText(/\/venha/, (msg) => {
+bot.onText(cmd("venha"), (msg) => {
   const inline_keyboard = PRESET_LOCATIONS.map((l, i) => [{ text: LOCATION_BUTTON_PREFIX + l.name, callback_data: `venha:${i}` }]);
   bot.sendMessage(msg.chat.id, "Bạn đang ở đâu?", { reply_markup: { inline_keyboard } });
 
@@ -119,11 +126,11 @@ bot.on("location", (msg) => {
   });
 });
 
-bot.onText(/\/myid/, (msg) => {
+bot.onText(cmd("myid"), (msg) => {
   bot.sendMessage(msg.chat.id, `User id của bạn: ${msg.from.id}\nChat id: ${msg.chat.id}`);
 });
 
-bot.onText(/\/status/, ownerOnly((msg) => {
+bot.onText(cmd("status"), ownerOnly((msg) => {
   const uptimeMinutes = Math.round(process.uptime() / 60);
   const memoryMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
   const jobs = listJobs();
@@ -158,7 +165,7 @@ async function sendServerStatus(chatId, messageId) {
   });
 }
 
-bot.onText(/\/server/, ownerOnly((msg) =>
+bot.onText(cmd("server"), ownerOnly((msg) =>
   sendServerStatus(msg.chat.id).catch((error) => console.error("/server error:", error.message)),
 ));
 
@@ -239,7 +246,7 @@ async function sendAppLog(chatId, name, kind = "err", lines = LOG_DEFAULT_LINES)
   return bot.sendMessage(chatId, header + body, { disable_web_page_preview: true });
 }
 
-bot.onText(/^\/logs(?:@\w+)?(?:\s+(.*))?$/, ownerOnly(async (msg, match) => {
+bot.onText(cmd("logs"), ownerOnly(async (msg, match) => {
   try {
     const args = (match[1] || "").trim().split(/\s+/).filter(Boolean);
     const name = args.find((a) => a !== "out" && !/^\d+$/.test(a));
@@ -273,12 +280,117 @@ bot.on("callback_query", async (query) => {
   }
 });
 
+// ---------------------------------------------------------------- ghi chú
+// /note <nội dung>: ghi. /note không kèm gì: bot hỏi lại, trả lời tin đó là được.
+// Chuyển tiếp (forward) tin nhắn có chữ vào chat riêng với bot cũng được lưu thành ghi chú.
+// /notes: xem (phân trang, nút xóa). /notes <từ khóa>: tìm, không cần gõ dấu.
+const NOTE_PROMPT = "📝 Ghi gì? (trả lời tin này)";
+
+function saveNote(chatId, text) {
+  const note = addNote(text);
+  return bot.sendMessage(chatId, `📝 Đã lưu ghi chú #${note.id}. Xem lại: /notes`);
+}
+
+bot.onText(cmd("note"), ownerOnly((msg, match) => {
+  const text = match[1]?.trim();
+  if (text) return saveNote(msg.chat.id, text);
+  return bot.sendMessage(msg.chat.id, NOTE_PROMPT, {
+    reply_markup: { force_reply: true, input_field_placeholder: "Nội dung ghi chú" },
+  });
+}));
+
+bot.on("message", (msg) => {
+  if (!isOwner(msg)) return;
+  const text = msg.text || msg.caption;
+  if (!text) return;
+
+  // Trả lời câu hỏi "Ghi gì?" của bot.
+  const replied = msg.reply_to_message;
+  if (replied?.from?.is_bot && replied.text === NOTE_PROMPT && !text.startsWith("/")) {
+    return saveNote(msg.chat.id, text);
+  }
+
+  // Tin chuyển tiếp trong chat riêng.
+  const origin = msg.forward_origin;
+  if (msg.chat.type === "private" && (origin || msg.forward_date)) {
+    const from =
+      origin?.sender_user?.first_name || origin?.sender_user_name || origin?.chat?.title || origin?.sender_chat?.title;
+    return saveNote(msg.chat.id, from ? `${text}\n— chuyển tiếp từ ${from}` : text);
+  }
+});
+
+bot.onText(cmd("notes"), ownerOnly((msg, match) => {
+  const query = match[1]?.trim();
+  const { text, reply_markup } = query ? renderSearch(query) : renderNotesPage(0);
+  return bot.sendMessage(msg.chat.id, text, { reply_markup, disable_web_page_preview: true });
+}));
+
+function editNotesMessage(query, { text, reply_markup }) {
+  return bot
+    .editMessageText(text, {
+      chat_id: query.message.chat.id,
+      message_id: query.message.message_id,
+      reply_markup,
+      disable_web_page_preview: true,
+    })
+    .catch((error) => {
+      if (!/message is not modified/.test(error.message)) throw error;
+    });
+}
+
+bot.on("callback_query", async (query) => {
+  const match = query.data?.match(/^notes:(p|del|yes):(\d+)(?::(\d+))?$/);
+  if (!match || !query.message) return;
+  try {
+    if (!isOwner(query)) {
+      return await bot.answerCallbackQuery(query.id, { text: "⛔ Chỉ chủ bot mới dùng được.", show_alert: true });
+    }
+    const [, action, a, b] = match;
+
+    if (action === "p") {
+      await bot.answerCallbackQuery(query.id);
+      return await editNotesMessage(query, renderNotesPage(Number(a)));
+    }
+
+    const id = Number(a);
+    const page = Number(b || 0);
+    if (action === "del") {
+      // Hỏi lại trước khi xóa, hiện nội dung để khỏi bấm nhầm.
+      const note = getNote(id);
+      if (!note) {
+        await bot.answerCallbackQuery(query.id, { text: `Ghi chú #${id} không còn.` });
+        return await editNotesMessage(query, renderNotesPage(page));
+      }
+      await bot.answerCallbackQuery(query.id);
+      const preview = note.text.length > 200 ? note.text.slice(0, 200) + "…" : note.text;
+      return await editNotesMessage(query, {
+        text: `🗑 Xóa ghi chú #${id}?\n\n${preview}`,
+        reply_markup: {
+          inline_keyboard: [[
+            { text: `✅ Xóa #${id}`, callback_data: `notes:yes:${id}:${page}` },
+            { text: "❌ Hủy", callback_data: `notes:p:${page}` },
+          ]],
+        },
+      });
+    }
+
+    // action === "yes"
+    const deleted = deleteNote(id);
+    await bot.answerCallbackQuery(query.id, { text: deleted ? `Đã xóa #${id}` : `Ghi chú #${id} không còn.` });
+    return await editNotesMessage(query, renderNotesPage(page));
+  } catch (error) {
+    console.error("notes callback error:", error.message);
+  }
+});
+
 // Danh sách lệnh dùng chung cho menu "/" của Telegram và /help.
 const COMMANDS = [
   { command: "giavang", description: "Xem giá vàng" },
   { command: "giaxang", description: "Xem giá xăng dầu" },
   { command: "nhietdo", description: "Xem nhiệt độ Hà Nội, Hải Thịnh, Phù Khê" },
   { command: "venha", description: "Tìm đường nhanh nhất về nhà bằng xe máy" },
+  { command: "note", description: "Ghi chú nhanh, vd /note mua dầu nhớt (chỉ chủ bot)" },
+  { command: "notes", description: "Xem / tìm / xóa ghi chú, vd /notes dau nhot (chỉ chủ bot)" },
   { command: "myid", description: "Xem user id / chat id" },
   { command: "status", description: "Tình trạng bot (chỉ chủ bot)" },
   { command: "server", description: "Tình trạng server + restart app pm2 (chỉ chủ bot)" },
@@ -289,12 +401,12 @@ bot.setMyCommands(COMMANDS).catch((error) => console.error("setMyCommands error:
 
 // Help command
 const help = COMMANDS.map((c) => `/${c.command} - ${c.description}`).join("\n");
-bot.onText(/\/start/, (msg) => {
+bot.onText(cmd("start"), (msg) => {
   const chatId = msg.chat.id;
   bot.sendMessage(chatId, "Chào mừng bạn đến với bot Hieuplasma!\n" + "Vui lòng nhập /help để xem các lệnh hỗ trợ.");
 }
 );
-bot.onText(/\/help/, (msg) => {
+bot.onText(cmd("help"), (msg) => {
   const chatId = msg.chat.id;
   bot.sendMessage(chatId, help);
 }
